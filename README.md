@@ -1,204 +1,102 @@
 # Dockerized RAG + MCP Agent
 
-A small multi-container system that ties together the two things you've
-already explored (RAG, MCP) with the thing you're learning now (Docker):
+[![Build Docker images](https://github.com/asfm2003/docker-rag-mcp-agent/actions/workflows/docker-build.yml/badge.svg)](https://github.com/asfm2003/docker-rag-mcp-agent/actions/workflows/docker-build.yml)
 
-```
-                 ┌──────────────┐
-   you  ───HTTP──▶     api      │  FastAPI "agent"
-                 │  (port 8000) │  - retrieves context from Chroma
-                 └──────┬───────┘  - calls a tool on mcp-server
-                        │          - asks Gemini to answer
-           agent-net (docker bridge network)
-                        │
-         ┌──────────────┼───────────────┐
-         ▼                              ▼
- ┌───────────────┐             ┌────────────────┐
- │    chroma     │             │   mcp-server   │
- │ vector store  │             │  (calculator,  │
- │ (port 8000)   │             │  word_count)   │
- └───────────────┘             └────────────────┘
+A small multi-container AI agent: a FastAPI service retrieves context from a
+vector database, optionally calls a tool on a custom MCP (Model Context
+Protocol) server, and asks Gemini to answer — all grounded in retrieved
+documents rather than the model's own memory. Three independently built
+services, wired together over a Docker network, each with its own Dockerfile,
+healthcheck, and failure mode.
+
+```mermaid
+flowchart LR
+    You([You]) -->|HTTP| API[api<br/>FastAPI agent]
+    API -->|retrieve context| Chroma[(chroma<br/>vector store)]
+    API -->|call tool| MCP[mcp-server<br/>MCP tool server]
+    API -->|generate answer| Gemini{{Gemini API}}
 ```
 
-Three containers, three concerns:
-- **chroma** — vector database (official image, no code of yours)
-- **mcp-server** — an MCP tool server you wrote, exposed over SSE
-- **api** — the agent: does retrieval, calls the MCP tool, calls Gemini
+## Why this isn't just "a script in a container"
 
-You don't need Docker knowledge going in. This README is a guided build,
-in order. Do the parts in sequence — each one only makes sense once the
-previous one is running.
+- **Three services, three separate concerns.** `chroma` is an off-the-shelf
+  vector database (official image, no custom code). `mcp-server` is a
+  hand-built MCP tool server exposed over SSE, reachable only from inside the
+  Docker network — it has no port published to the host. `api` is the agent
+  logic that ties retrieval, tool-calling, and generation together.
+- **Multi-stage Docker builds.** `api/Dockerfile` separates a "builder" stage
+  (compilers, build headers) from the runtime image, so none of the build
+  tooling ships in the final image.
+- **Real inter-service networking**, not `localhost` shortcuts — services
+  address each other by Docker Compose service name (`chroma`, `mcp-server`),
+  resolved through Docker's internal DNS.
+- **CI that actually builds it.** The GitHub Actions workflow builds both
+  custom images on every push — the badge above is proof the Dockerfiles work
+  in a clean environment, not just on one machine.
+- **Debugged, not just demoed.** See [`docs/LEARNING.md`](docs/LEARNING.md#real-bugs-hit-while-building-this-and-how-they-were-diagnosed)
+  for the real bugs hit while building this — a build-context mistake, a
+  version-mismatch crash between a pinned server image and an unpinned client
+  library, and a prompt logic bug — and how each was actually diagnosed from
+  container logs, not guessed at.
 
-## Prerequisites
-
-- Docker Desktop (or Docker Engine + Compose plugin) installed
-- A Gemini API key (for the `/chat` endpoint — everything else works
-  without one)
-
-## Part 0 — get the containers running
+## Quickstart
 
 ```bash
-cp .env.example .env        # then paste your real ANTHROPIC_API_KEY in
-docker compose up --build
-```
-
-First run will take a couple of minutes (building images, pulling the
-Chroma image, installing Python deps). Leave this terminal open — you'll see
-interleaved logs from all three containers, prefixed by service name. That
-prefix is one of the first genuinely useful things compose gives you: in a
-3+ container app, `docker compose logs -f api` to isolate just one service's
-logs is something you'll use constantly.
-
-In a second terminal, check everything's healthy:
-
-```bash
-docker compose ps
-```
-
-You should see three services, `chroma` and the containers with a
-`(healthy)` status once their HEALTHCHECKs have passed a few times.
-
-**What just happened, concept by concept:**
-- `docker compose up` read `docker-compose.yml`, and for each service either
-  pulled an image (`chroma`) or built one from a Dockerfile (`api`,
-  `mcp-server`).
-- It created one shared network (`agent-net`) and attached all three
-  containers to it, so they can reach each other by service name.
-- It created a named volume (`chroma_data`) for Chroma's storage, so if you
-  stop and restart the stack, your ingested documents are still there.
-
-Try killing it and bringing it back to prove that to yourself:
-
-```bash
-docker compose down       # stops and removes containers, keeps the volume
-docker compose up -d      # -d = detached, runs in the background
-```
-
-## Part 1 — ingest some documents and ask a question
-
-```bash
+git clone https://github.com/YOUR_USERNAME/docker-rag-mcp-agent.git
+cd docker-rag-mcp-agent
+cp .env.example .env   # add your GEMINI_API_KEY (https://aistudio.google.com/apikey)
+docker compose up --build -d
 curl -X POST http://localhost:8000/ingest/sample-docs
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"query": "What does a Docker healthcheck do?"}'
 ```
 
-You should get back an answer, plus the retrieved chunks it was grounded in.
-That request just crossed all three containers: `api` queried `chroma` over
-the network, then called Gemini, using only context Chroma returned.
-
-Now try the MCP tool path:
-
-```bash
-curl http://localhost:8000/tools
-curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{"query": "(14 + 8) * 3", "use_calculator": true}'
-```
-
-`GET /tools` calls `mcp_client.list_tools()`, which opens an SSE connection
-to `mcp-server` — proof `api` can reach a container it never mentions by IP,
-only by the name `mcp-server`, because that's the service name in
-`docker-compose.yml`.
-
-## Part 2 — read the Dockerfiles
-
-Now that you've seen it work, read `mcp_server/Dockerfile` (simple,
-single-stage) then `api/Dockerfile` (multi-stage). Both are heavily
-commented — that's where most of the "why", not just "what", lives. Key
-ideas to walk away with:
-
-1. **Layer caching** — instructions are cached in order; put things that
-   change rarely (installing dependencies) before things that change often
-   (your source code).
-2. **Multi-stage builds** — build tools live in a throwaway "builder" stage;
-   only the compiled result gets copied into the final image. Compare image
-   sizes yourself:
-   ```bash
-   docker images | grep docker-rag-mcp-agent
-   ```
-3. **Non-root users** — both images create and switch to an unprivileged
-   user before running the app.
-4. **Healthchecks** — how compose knows a service is actually ready, not
-   just "started" (see `depends_on: condition: service_healthy` for `chroma`
-   in docker-compose.yml).
-5. **Build context** — `api/Dockerfile`'s top comment explains why its
-   `context:` in docker-compose.yml is `.` (project root), not `./api`.
-
-## Part 3 — break it on purpose
-
-The fastest way to actually learn Docker is to watch it fail correctly.
-Try each of these and think about *why* before reading the answer:
-
-- Stop `chroma` only: `docker compose stop chroma`, then hit `/chat` again.
-  <details><summary>What happens / why</summary>
-  The api container's retrieval call fails because it can no longer reach
-  chroma:8000 — connection refused. This is why real systems add retries
-  and circuit breakers around inter-service calls; a single dependency going
-  down shouldn't necessarily crash the whole request.
-  </details>
-
-- Edit `mcp_server/server.py` (e.g. add a `print` statement), then
-  `docker compose up --build mcp-server`, without rebuilding `api`.
-  <details><summary>What happens / why</summary>
-  Only the mcp-server image rebuilds — its Dockerfile layer for `COPY
-  server.py .` is invalidated but api's image build cache is untouched. This
-  is the payoff of splitting services into separate Dockerfiles instead of
-  one giant container.
-  </details>
-
-- Run `docker compose down -v` (note the `-v`), then `docker compose up`,
-  then try `/chat` before re-ingesting.
-  <details><summary>What happens / why</summary>
-  `-v` removes the named volume too, so chroma_data is gone and your
-  ingested documents with it. Retrieval returns nothing. This demonstrates
-  the volume, not the container, is what held your data.
-  </details>
-
-## Part 4 — extend it yourself
-
-Pick at least one, since a from-scratch extension is what actually makes
-this a portfolio piece rather than a tutorial you followed:
-
-- **Add a Redis container** for conversation history/caching. New service in
-  compose, new env var on `api`, a couple lines with `redis-py`. Forces you
-  to practice adding a fourth service to an existing network from scratch.
-- **Add a new MCP tool** (e.g. a stub "web_search" tool, or one that reads
-  the sample docs directory) and call it conditionally from `/chat`.
-- **Add resource limits** to each service in compose (`deploy.resources.limits`)
-  and watch what happens to a container that exceeds its memory limit.
-- **Push images to GitHub Container Registry** via the existing GitHub
-  Actions workflow (`.github/workflows/docker-build.yml` currently only
-  builds — extend it to also `docker/login-action` + push on `main`).
-- **Add a `docker-compose.prod.yml` override** that removes bind-mounted
-  source (if you add one for live-reload dev) and sets `restart: unless-stopped`.
-
-## Repo layout
+## What's inside
 
 ```
 docker-rag-mcp-agent/
 ├── docker-compose.yml       # orchestrates all three services
-├── .env.example             # copy to .env, add your API key
 ├── api/
-│   ├── Dockerfile            # multi-stage build, heavily commented
-│   ├── requirements.txt
+│   ├── Dockerfile            # multi-stage build
 │   └── app/
 │       ├── main.py           # FastAPI endpoints: /health /ingest /chat /tools
 │       ├── rag.py            # Chroma client wrapper
-│       └── mcp_client.py     # MCP SSE client used by /chat and /tools
+│       └── mcp_client.py     # MCP SSE client
 ├── mcp_server/
 │   ├── Dockerfile
-│   ├── requirements.txt
-│   └── server.py             # FastMCP tool server: calculator, word_count
-├── data/sample_docs/         # sample text ingested by /ingest/sample-docs
+│   └── server.py             # MCP tool server: calculator, word_count
+├── data/sample_docs/         # sample text for the /ingest/sample-docs endpoint
 └── .github/workflows/        # CI: builds both images on every push
 ```
 
-## For your portfolio
+## What I'd add before calling this production-ready
 
-When you write this up (README on GitHub is often enough, but a short blog
-post travels further), the story worth telling isn't "I used Docker" — it's:
-*three independently-built services, wired together over a Docker network,
-each with its own Dockerfile, healthcheck, and failure mode, orchestrated
-with one compose file.* That's a materially different (and more hireable)
-claim than "I containerized a script."
+Being upfront about the gap between "runs locally" and "production system"
+is itself part of demonstrating engineering judgment:
+
+- **Retries / circuit-breaking** around the `chroma` and MCP calls in
+  `main.py` — right now a dependency outage 500s the whole request instead of
+  degrading gracefully (see the "break it on purpose" exercises in
+  [`docs/LEARNING.md`](docs/LEARNING.md#part-3--break-it-on-purpose)).
+- **Secrets management** beyond a local `.env` file — a real deployment would
+  use a secrets manager (AWS Secrets Manager, Vault, Docker/Kubernetes
+  secrets) rather than an environment variable sourced from a plaintext file.
+- **Structured logging and tracing** across the three services, so a failed
+  request can be followed end-to-end instead of grepped for across three
+  `docker compose logs` streams.
+- **Horizontal scaling** for `api` — it's currently a single container; a
+  real deployment would run multiple replicas behind a load balancer, which
+  changes how you think about state (none of it currently lives in `api`
+  itself, which is a deliberate, scaling-friendly choice).
+
+## Learning walkthrough
+
+If you want the guided, step-by-step version of building and running this
+(what each Docker concept means, what to expect at each command, exercises
+that intentionally break things to show how Docker recovers) — see
+[`docs/LEARNING.md`](docs/LEARNING.md).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
