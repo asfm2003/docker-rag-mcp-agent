@@ -39,6 +39,13 @@ flowchart LR
   library, and a prompt logic bug — and how each was actually diagnosed from
   container logs, not guessed at.
 
+## Demo
+
+A real request hitting all three containers — retrieval from Chroma, a tool
+call to the MCP server, and generation via Gemini:
+
+![Demo: RAG + MCP agent responding to a request](docs/images/demo.png)
+
 ## Quickstart
 
 ```bash
