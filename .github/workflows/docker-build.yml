@@ -1,0 +1,35 @@
+name: Build Docker images
+
+# Runs on every push/PR to main. This alone is a meaningful portfolio signal:
+# it proves your Dockerfiles actually build cleanly in a fresh environment,
+# not just "on my machine." It does not push anywhere or need secrets — it
+# only validates the build. See README.md "Stretch goals" for wiring this up
+# to push to GitHub Container Registry (ghcr.io).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [api, mcp-server]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.service }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.service == 'api' && 'api/Dockerfile' || 'mcp_server/Dockerfile' }}
+          push: false
+          tags: ${{ matrix.service }}:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

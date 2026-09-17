@@ -1,0 +1,66 @@
+services:
+  # --- Vector database ---
+  # We use the official pre-built image rather than writing our own
+  # Dockerfile for it — a good rule of thumb: only build a custom image for
+  # the parts of the system that are actually yours.
+  chroma:
+    image: chromadb/chroma:0.5.20
+    ports:
+      - "8001:8000" # host:container — lets you hit Chroma directly at
+                     # localhost:8001 from your laptop for debugging, even
+                     # though other containers reach it as "chroma:8000".
+    volumes:
+      # Named volume: Docker manages where this actually lives on disk. Your
+      # ingested vectors survive `docker compose down` and container
+      # restarts, and only disappear if you explicitly run
+      # `docker compose down -v`.
+      - chroma_data:/chroma/chroma
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/heartbeat')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - agent-net
+
+  # --- MCP tool server ---
+  mcp-server:
+    build:
+      context: ./mcp_server
+      dockerfile: Dockerfile
+    # No ports published to the host: nothing outside the Docker network
+    # needs to reach this directly, only the "api" service does, over the
+    # internal "agent-net" network. Keeping it unpublished shrinks the
+    # attack surface — this is the same principle a real production
+    # deployment follows for internal-only services.
+    networks:
+      - agent-net
+
+  # --- RAG + MCP agent API ---
+  api:
+    build:
+      context: .            # root context — see the NOTE at the top of api/Dockerfile
+      dockerfile: api/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - CHROMA_HOST=chroma
+      - CHROMA_PORT=8000
+      - MCP_SERVER_URL=http://mcp-server:8100/sse
+    depends_on:
+      chroma:
+        condition: service_healthy
+      mcp-server:
+        condition: service_started
+    networks:
+      - agent-net
+
+networks:
+  agent-net:
+    driver: bridge
+
+volumes:
+  chroma_data:

@@ -1,0 +1,14 @@
+# Keeps the build context small (faster builds, faster `docker build` upload)
+# and keeps secrets/local junk out of images entirely.
+.git
+.github
+.env
+.env.*
+!.env.example
+**/__pycache__
+**/*.pyc
+.venv
+venv
+chroma_data
+*.md
+.DS_Store

@@ -1,0 +1,21 @@
+Docker Networking and Volumes
+
+By default, docker-compose creates a private bridge network for all services
+defined in the compose file. Containers on the same network can reach each
+other by service name — for example, a container named "api" can connect to
+"http://chroma:8000" and Docker's internal DNS resolves "chroma" to that
+container's IP address. This is why you rarely hardcode IP addresses in
+compose-based apps.
+
+Containers are ephemeral: when a container is removed, any data written to its
+writable layer is lost. Volumes solve this. A named volume is storage managed
+by Docker, mounted into a container at a specific path, and it survives
+container restarts and removals. Bind mounts, in contrast, map a host directory
+directly into the container — useful for local development so code edits on
+the host show up instantly inside the container.
+
+Healthchecks let Docker (and depends_on: condition: service_healthy in
+compose) know when a service is actually ready to accept traffic, not just
+"started." A database container might start in milliseconds but take several
+seconds before it can accept connections — healthchecks prevent dependent
+services from failing on startup races.
